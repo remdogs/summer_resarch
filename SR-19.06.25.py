@@ -1,82 +1,156 @@
 import pandas as pd
-import matplotlib.pyplot as plt
-from statsmodels.tsa.arima.model import ARIMA
-from datetime import datetime, timedelta
 import numpy as np
-from sklearn.linear_model import LinearRegression
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import GradientBoostingRegressor
+import ta
+import random
+import warnings
+warnings.filterwarnings('ignore')
 
 print("Stage 1: Import libraries - DONE")
 
-# Step 1: Load the CSV data
-csv_path = "/Users/remylieberman/Desktop/research/prototype1/jd_sports_stock_until_2024.csv"
+# Load and prepare data (same as before)
+csv_path = "/Users/remylieberman/Desktop/research/prototype1/summer_resarch/jd_sports_stock_until_2024.csv"
 data = pd.read_csv(csv_path)
-
-# Step 2: Preprocess the data
 data['Date'] = pd.to_datetime(data['Date'])
 data.set_index('Date', inplace=True)
-data = data.asfreq('B')  # Set frequency to business days
-close_prices = data['Close'].fillna(method='ffill')  # Fill missing values
 
-# Step 3: Train a time series model
-model = ARIMA(close_prices, order=(5, 1, 0))  # ARIMA(p=5, d=1, q=0)
-model_fit = model.fit()
+def create_advanced_features(df):
+    # Previous feature creation code...
+    return df
 
-# Step 4: Predict January 2025
-start_date = '2025-01-01'
-end_date = '2025-01-31'
-predictions = model_fit.predict(start=start_date, end=end_date)
+data = create_advanced_features(data)
+data = data.dropna()
 
-# Step 5: Plot the predictions
-plt.figure(figsize=(10, 6))
-plt.plot(predictions.index, predictions, label="Predicted Prices", color="blue")
-plt.title("Stock Price Predictions for January 2025")
-plt.xlabel("Date")
-plt.ylabel("Price")
-plt.legend()
-plt.grid()
-plt.show()
+# New function to generate realistic market movements
+def generate_realistic_predictions(last_price, days, volatility):
+    """
+    Generate realistic price movements using a combination of trends and random walks
+    """
+    predictions = [last_price]
+    
+    # Calculate historical metrics
+    historical_volatility = data['Close'].pct_change().std()
+    avg_daily_change = data['Close'].pct_change().mean()
+    
+    # Market regime parameters
+    trend_strength = random.uniform(0.3, 0.7)
+    cycle_length = random.randint(20, 40)
+    
+    for day in range(days):
+        prev_price = predictions[-1]
+        
+        # Combine multiple factors for price movement
+        
+        # 1. Random walk component
+        random_walk = np.random.normal(0, historical_volatility * volatility)
+        
+        # 2. Trend component (using sine wave for cyclic behavior)
+        trend = np.sin(2 * np.pi * day / cycle_length) * trend_strength
+        
+        # 3. Momentum component
+        if len(predictions) > 5:
+            momentum = (predictions[-1] - predictions[-5]) / predictions[-5]
+        else:
+            momentum = 0
+            
+        # 4. Mean reversion component
+        mean_reversion = (np.mean(predictions) - prev_price) * 0.1
+        
+        # 5. Volatility clustering
+        if abs(random_walk) > 2 * historical_volatility:
+            volatility *= 1.1  # Increase volatility after large moves
+        else:
+            volatility *= 0.99  # Gradually decrease volatility
+            
+        # 6. Add some random shocks
+        if random.random() < 0.05:  # 5% chance of a significant move
+            shock = random.choice([-1, 1]) * random.uniform(0.02, 0.05) * prev_price
+        else:
+            shock = 0
+            
+        # Combine all components
+        daily_return = (random_walk + 
+                       trend * historical_volatility + 
+                       momentum * 0.2 + 
+                       mean_reversion + 
+                       shock)
+        
+        # Calculate new price
+        new_price = prev_price * (1 + daily_return)
+        
+        # Add some constraints to prevent unrealistic movements
+        max_daily_move = 0.1  # 10% max daily move
+        if abs(new_price/prev_price - 1) > max_daily_move:
+            new_price = prev_price * (1 + max_daily_move * np.sign(new_price - prev_price))
+            
+        predictions.append(new_price)
+    
+    return predictions[1:]  # Remove the initial seed price
 
-# Approximate prices from the graph (manually estimated for 3 days)
-prices = [
-    76.1, 75.6, 75.0, 74.8, 75.2, 75.0, 75.5, 75.3, 75.9, 75.6,
-    76.0, 75.7, 76.8, 76.1, 76.4, 75.9, 75.3, 76.0, 75.2, 74.8,
-    74.9, 75.1, 74.7, 74.8
-]
-print("Stage 2: Prices loaded - DONE")
+# Generate predictions
+last_known_price = data['Close'].iloc[-1]
+future_dates = pd.date_range(start='2025-01-01', end='2025-06-19', freq='B')
+n_days = len(future_dates)
 
-# Create time steps for each price
-X = np.arange(len(prices)).reshape(-1, 1)
-y = np.array(prices)
-print("Stage 3: Time steps created - DONE")
+# Generate multiple prediction scenarios
+n_scenarios = 50
+all_scenarios = []
+for _ in range(n_scenarios):
+    scenario = generate_realistic_predictions(last_known_price, n_days, volatility=1.0)
+    all_scenarios.append(scenario)
 
-# Use last 6 points to fit a linear regression model
-X_recent = X[-6:]
-y_recent = y[-6:]
-model = LinearRegression()
-model.fit(X_recent, y_recent)
-print("Stage 4: Linear regression model fitted - DONE")
-
-# Predict the next day (let's say 8 more time steps)
-future_steps = 8
-X_future = np.arange(len(prices), len(prices) + future_steps).reshape(-1, 1)
-y_future = model.predict(X_future)
-print("Stage 5: Future predictions made - DONE")
-
-# Combine original and predicted data for plotting
-all_prices = np.concatenate((prices, y_future))
-print("Stage 6: Data combined for plotting - DONE")
+# Calculate the main prediction and confidence intervals
+predictions = np.mean(all_scenarios, axis=0)
+confidence_lower = np.percentile(all_scenarios, 5, axis=0)
+confidence_upper = np.percentile(all_scenarios, 95, axis=0)
 
 # Plotting
-print("Stage 7: Plotting - Starting...")
-plt.figure(figsize=(10, 4))
-plt.plot(range(len(prices)), prices, label="Actual", color='red')
-plt.plot(range(len(prices), len(prices) + future_steps), y_future, label="Predicted", linestyle='--', color='blue')
-plt.axvline(x=len(prices)-1, color='gray', linestyle=':', label="Prediction Start")
-plt.title("Stock Price: 3 Days + Predicted Next Day")
-plt.xlabel("Time Step")
-plt.ylabel("Price")
+plt.figure(figsize=(15, 8))
+
+# Plot historical data
+plt.plot(data.index[-90:], data['Close'][-90:], label='Historical', color='blue')
+
+# Plot predictions
+plt.plot(future_dates, predictions, label='Predictions', color='red', linestyle='--')
+plt.fill_between(future_dates, confidence_lower, confidence_upper,
+                 color='red', alpha=0.2, label='95% Confidence Interval')
+
+# Calculate y-axis limits with padding
+all_values = np.concatenate([data['Close'][-90:], predictions, confidence_upper, confidence_lower])
+y_min = min(all_values) * 0.95
+y_max = max(all_values) * 1.05
+
+plt.ylim(y_min, y_max)
+plt.title('Dynamic Stock Price Predictions January-June 2025')
+plt.xlabel('Date')
+plt.ylabel('Price (£)')
 plt.legend()
-plt.grid(True, linestyle='--', alpha=0.3)
-plt.ylim(74, 77.5)
+plt.grid(True)
+plt.xticks(rotation=45)
+plt.tight_layout()
 plt.show()
-print("Stage 8: Plot shown - DONE")
+
+# Print analysis
+print("\nPrediction Analysis:")
+print(f"Starting price: £{predictions[0]:.2f}")
+print(f"Ending price: £{predictions[-1]:.2f}")
+print(f"Highest predicted price: £{max(predictions):.2f}")
+print(f"Lowest predicted price: £{min(predictions):.2f}")
+print(f"Average volatility: {np.std(np.diff(predictions))/np.mean(predictions)*100:.2f}%")
+
+# Calculate monthly statistics
+monthly_stats = {}
+for i, date in enumerate(future_dates):
+    month = date.strftime('%B')
+    if month not in monthly_stats:
+        monthly_stats[month] = []
+    monthly_stats[month].append(predictions[i])
+
+print("\nMonthly Statistics:")
+for month, prices in monthly_stats.items():
+    print(f"\n{month} 2025:")
+    print(f"Average: £{np.mean(prices):.2f}")
+    print(f"Range: £{min(prices):.2f} - £{max(prices):.2f}")
+    print(f"Monthly Volatility: {np.std(prices)/np.mean(prices)*100:.2f}%")
