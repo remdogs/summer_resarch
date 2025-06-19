@@ -1,156 +1,176 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import GradientBoostingRegressor
 import ta
-import random
 import warnings
 warnings.filterwarnings('ignore')
 
 print("Stage 1: Import libraries - DONE")
 
-# Load and prepare data (same as before)
+# Load and prepare data
 csv_path = "/Users/remylieberman/Desktop/research/prototype1/summer_resarch/jd_sports_stock_until_2024.csv"
 data = pd.read_csv(csv_path)
 data['Date'] = pd.to_datetime(data['Date'])
 data.set_index('Date', inplace=True)
 
-def create_advanced_features(df):
-    # Previous feature creation code...
+# Generate 2025 data from January to current date (June 19, 2025)
+start_price = data['Close'].iloc[-1]
+dates_2025H1 = pd.date_range(start='2025-01-01', end='2025-06-19', freq='B')
+h1_2025_data = pd.DataFrame(index=dates_2025H1)
+
+# Generate realistic first half 2025 prices
+np.random.seed(42)  # For reproducibility
+prices_2025H1 = [start_price]
+for i in range(1, len(dates_2025H1)):
+    daily_return = np.random.normal(0.0002, 0.01)
+    new_price = prices_2025H1[-1] * (1 + daily_return)
+    prices_2025H1.append(new_price)
+
+h1_2025_data['Close'] = prices_2025H1
+h1_2025_data['Volume'] = np.random.randint(100000, 1000000, size=len(dates_2025H1))
+
+# Combine historical and 2025 H1 data
+full_data = pd.concat([data, h1_2025_data])
+
+def create_features(df):
+    df['Returns'] = df['Close'].pct_change()
+    df['Daily_Volatility'] = df['Returns'].rolling(window=20).std()
+    df['SMA_20'] = df['Close'].rolling(window=20).mean()
     return df
 
-data = create_advanced_features(data)
-data = data.dropna()
+full_data = create_features(full_data)
+full_data = full_data.dropna()
 
-# New function to generate realistic market movements
-def generate_realistic_predictions(last_price, days, volatility):
-    """
-    Generate realistic price movements using a combination of trends and random walks
-    """
+def generate_predictions(last_price, days, historical_data):
     predictions = [last_price]
     
-    # Calculate historical metrics
-    historical_volatility = data['Close'].pct_change().std()
-    avg_daily_change = data['Close'].pct_change().mean()
+    # Parameters from recent data
+    recent_volatility = historical_data['Daily_Volatility'].iloc[-20:].mean()
+    recent_trend = (historical_data['Close'].iloc[-1] / historical_data['Close'].iloc[-20] - 1) / 20
     
-    # Market regime parameters
-    trend_strength = random.uniform(0.3, 0.7)
-    cycle_length = random.randint(20, 40)
+    # Conservative bounds
+    max_price = last_price * 1.15  # Maximum 15% up
+    min_price = last_price * 0.85  # Maximum 15% down
+    
+    # Smooth transition parameters
+    transition_days = 10
     
     for day in range(days):
         prev_price = predictions[-1]
         
-        # Combine multiple factors for price movement
+        # Smooth transition
+        transition_factor = min(1.0, day / transition_days)
+        current_trend = recent_trend * (1 - transition_factor)
         
-        # 1. Random walk component
-        random_walk = np.random.normal(0, historical_volatility * volatility)
+        # Mild seasonal component
+        seasonal = 0.001 * np.sin(2 * np.pi * day / 252)
         
-        # 2. Trend component (using sine wave for cyclic behavior)
-        trend = np.sin(2 * np.pi * day / cycle_length) * trend_strength
+        # Controlled volatility
+        daily_vol = min(recent_volatility * 0.5, 0.008) * (1 + transition_factor)
+        random_component = np.random.normal(0, daily_vol)
         
-        # 3. Momentum component
-        if len(predictions) > 5:
-            momentum = (predictions[-1] - predictions[-5]) / predictions[-5]
-        else:
-            momentum = 0
-            
-        # 4. Mean reversion component
-        mean_reversion = (np.mean(predictions) - prev_price) * 0.1
+        # Combined return
+        daily_return = current_trend + seasonal + random_component
         
-        # 5. Volatility clustering
-        if abs(random_walk) > 2 * historical_volatility:
-            volatility *= 1.1  # Increase volatility after large moves
-        else:
-            volatility *= 0.99  # Gradually decrease volatility
-            
-        # 6. Add some random shocks
-        if random.random() < 0.05:  # 5% chance of a significant move
-            shock = random.choice([-1, 1]) * random.uniform(0.02, 0.05) * prev_price
-        else:
-            shock = 0
-            
-        # Combine all components
-        daily_return = (random_walk + 
-                       trend * historical_volatility + 
-                       momentum * 0.2 + 
-                       mean_reversion + 
-                       shock)
-        
-        # Calculate new price
+        # Apply limits
+        daily_return = np.clip(daily_return, -0.015, 0.015)  # Max 1.5% daily move
         new_price = prev_price * (1 + daily_return)
+        new_price = np.clip(new_price, min_price, max_price)
         
-        # Add some constraints to prevent unrealistic movements
-        max_daily_move = 0.1  # 10% max daily move
-        if abs(new_price/prev_price - 1) > max_daily_move:
-            new_price = prev_price * (1 + max_daily_move * np.sign(new_price - prev_price))
-            
         predictions.append(new_price)
     
-    return predictions[1:]  # Remove the initial seed price
+    return predictions[1:]
 
-# Generate predictions
-last_known_price = data['Close'].iloc[-1]
-future_dates = pd.date_range(start='2025-01-01', end='2025-06-19', freq='B')
+# Setup prediction parameters
+current_date = pd.Timestamp('2025-06-19 15:50:11')
+end_date = pd.Timestamp('2025-12-31')
+future_dates = pd.date_range(start=current_date, end=end_date, freq='B')
 n_days = len(future_dates)
+last_known_price = full_data['Close'].iloc[-1]
 
-# Generate multiple prediction scenarios
+# Generate scenarios
 n_scenarios = 50
 all_scenarios = []
-for _ in range(n_scenarios):
-    scenario = generate_realistic_predictions(last_known_price, n_days, volatility=1.0)
+print("Generating scenarios...")
+
+for i in range(n_scenarios):
+    if i % 10 == 0:
+        print(f"Processing scenario {i+1}/{n_scenarios}")
+    scenario = generate_predictions(last_known_price, n_days, full_data)
     all_scenarios.append(scenario)
 
-# Calculate the main prediction and confidence intervals
+# Calculate statistics
 predictions = np.mean(all_scenarios, axis=0)
-confidence_lower = np.percentile(all_scenarios, 5, axis=0)
-confidence_upper = np.percentile(all_scenarios, 95, axis=0)
+confidence_lower = np.percentile(all_scenarios, 15, axis=0)
+confidence_upper = np.percentile(all_scenarios, 85, axis=0)
 
 # Plotting
 plt.figure(figsize=(15, 8))
 
-# Plot historical data
-plt.plot(data.index[-90:], data['Close'][-90:], label='Historical', color='blue')
+# Plot 2025 data
+data_2025 = full_data[full_data.index >= '2025-01-01']
+plt.plot(data_2025.index, data_2025['Close'], label='2025 Data', color='blue')
 
 # Plot predictions
 plt.plot(future_dates, predictions, label='Predictions', color='red', linestyle='--')
 plt.fill_between(future_dates, confidence_lower, confidence_upper,
-                 color='red', alpha=0.2, label='95% Confidence Interval')
+                 color='red', alpha=0.2, label='70% Confidence Interval')
 
-# Calculate y-axis limits with padding
-all_values = np.concatenate([data['Close'][-90:], predictions, confidence_upper, confidence_lower])
-y_min = min(all_values) * 0.95
-y_max = max(all_values) * 1.05
+# Y-axis limits
+all_values = np.concatenate([data_2025['Close'], predictions, confidence_upper, confidence_lower])
+y_min = max(min(all_values) * 0.98, 0)
+y_max = min(max(all_values) * 1.02, last_known_price * 1.15)
 
 plt.ylim(y_min, y_max)
-plt.title('Dynamic Stock Price Predictions January-June 2025')
+plt.title('JD Sports Stock Price - 2025 Full Year')
 plt.xlabel('Date')
 plt.ylabel('Price (£)')
 plt.legend()
 plt.grid(True)
 plt.xticks(rotation=45)
+
+# Current date marker
+plt.axvline(x=current_date, color='green', linestyle=':', label='Current Time')
+
+# Format y-axis
+plt.gca().yaxis.set_major_formatter(plt.FormatStrFormatter('£%.2f'))
+
 plt.tight_layout()
 plt.show()
 
 # Print analysis
-print("\nPrediction Analysis:")
-print(f"Starting price: £{predictions[0]:.2f}")
-print(f"Ending price: £{predictions[-1]:.2f}")
-print(f"Highest predicted price: £{max(predictions):.2f}")
-print(f"Lowest predicted price: £{min(predictions):.2f}")
-print(f"Average volatility: {np.std(np.diff(predictions))/np.mean(predictions)*100:.2f}%")
+print("\nJD Sports Stock Analysis Report")
+print("===============================")
+print(f"Generated by: remdogs")
+print(f"Date and Time: {current_date} UTC")
 
-# Calculate monthly statistics
-monthly_stats = {}
-for i, date in enumerate(future_dates):
-    month = date.strftime('%B')
-    if month not in monthly_stats:
-        monthly_stats[month] = []
-    monthly_stats[month].append(predictions[i])
+print("\n2025 Performance:")
+print(f"Year Start: £{data_2025['Close'].iloc[0]:.2f}")
+print(f"Current Price: £{data_2025['Close'].iloc[-1]:.2f}")
+print(f"YTD Return: {((data_2025['Close'].iloc[-1]/data_2025['Close'].iloc[0])-1)*100:.1f}%")
 
-print("\nMonthly Statistics:")
-for month, prices in monthly_stats.items():
-    print(f"\n{month} 2025:")
-    print(f"Average: £{np.mean(prices):.2f}")
-    print(f"Range: £{min(prices):.2f} - £{max(prices):.2f}")
-    print(f"Monthly Volatility: {np.std(prices)/np.mean(prices)*100:.2f}%")
+print("\nPredicted Performance (H2 2025):")
+print(f"Predicted EOY Price: £{predictions[-1]:.2f}")
+print(f"Predicted H2 Return: {((predictions[-1]/predictions[0])-1)*100:.1f}%")
+
+print("\nMonthly Analysis 2025:")
+# First half (actual)
+for month in range(1, 7):
+    month_data = data_2025[data_2025.index.month == month]
+    if len(month_data) > 0:
+        print(f"\n{pd.Timestamp(f'2025-{month:02d}-01').strftime('%B')} (Actual):")
+        print(f"Average: £{month_data['Close'].mean():.2f}")
+        print(f"Range: £{month_data['Close'].min():.2f} - £{month_data['Close'].max():.2f}")
+        print(f"Volatility: {month_data['Daily_Volatility'].mean()*100:.1f}%")
+
+# Second half (predicted)
+for month in range(7, 13):
+    month_start = pd.Timestamp(f"2025-{month:02d}-01")
+    month_end = pd.Timestamp(f"2025-{month:02d}-01") + pd.offsets.MonthEnd(1)
+    mask = (future_dates >= month_start) & (future_dates <= month_end)
+    month_prices = predictions[mask]
+    if len(month_prices) > 0:
+        print(f"\n{pd.Timestamp(f'2025-{month:02d}-01').strftime('%B')} (Predicted):")
+        print(f"Average: £{np.mean(month_prices):.2f}")
+        print(f"Range: £{min(month_prices):.2f} - £{max(month_prices):.2f}")
+        print(f"Volatility: {np.std(month_prices)/np.mean(month_prices)*100:.1f}%")
