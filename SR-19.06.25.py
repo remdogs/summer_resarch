@@ -174,3 +174,12 @@ for month in range(7, 13):
         print(f"Average: £{np.mean(month_prices):.2f}")
         print(f"Range: £{min(month_prices):.2f} - £{max(month_prices):.2f}")
         print(f"Volatility: {np.std(month_prices)/np.mean(month_prices)*100:.1f}%")
+        
+        
+"""
+the next thing to do would be try to understand how the current news for each
+day,week or month buy pulling all relevent news from that time period. then pass
+it into gpt and determine how it will influence the stock price and by how much.
+this would then allow the program to not just be influced by the pure graph but
+also by real world events
+"""
