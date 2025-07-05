@@ -1,36 +1,30 @@
+import sys
+import argparse
+import subprocess
+import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from datetime import timedelta
 import ta
-import warnings
-warnings.filterwarnings('ignore')
 
-print("Stage 1: Import libraries - DONE")
+def get_user_inputs():
+    parser = argparse.ArgumentParser(description="Stock Price Predictor (with scenario display and honest uncertainty)")
+    parser.add_argument('--csv', type=str, help='Path to the CSV file (from yfinance)', required=True)
+    parser.add_argument('--years', type=float, help='Years to predict into the future (e.g., 1, 2.5)', required=True)
+    parser.add_argument('--scenarios', type=int, default=20, help='Number of scenario paths to display')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed (for reproducibility)')
+    args = parser.parse_args()
+    return args.csv, args.years, args.scenarios, args.seed
 
-# Load and prepare data
-csv_path = "/Users/remylieberman/Desktop/research/prototype1/summer_resarch/jd_sports_stock_until_2024.csv"
-data = pd.read_csv(csv_path)
-data['Date'] = pd.to_datetime(data['Date'])
-data.set_index('Date', inplace=True)
-
-# Generate 2025 data from January to current date (June 19, 2025)
-start_price = data['Close'].iloc[-1]
-dates_2025H1 = pd.date_range(start='2025-01-01', end='2025-06-19', freq='B')
-h1_2025_data = pd.DataFrame(index=dates_2025H1)
-
-# Generate realistic first half 2025 prices
-np.random.seed(42)  # For reproducibility
-prices_2025H1 = [start_price]
-for i in range(1, len(dates_2025H1)):
-    daily_return = np.random.normal(0.0002, 0.01)
-    new_price = prices_2025H1[-1] * (1 + daily_return)
-    prices_2025H1.append(new_price)
-
-h1_2025_data['Close'] = prices_2025H1
-h1_2025_data['Volume'] = np.random.randint(100000, 1000000, size=len(dates_2025H1))
-
-# Combine historical and 2025 H1 data
-full_data = pd.concat([data, h1_2025_data])
+def run_fetcher_if_needed(csv_file):
+    if "JD" in csv_file.upper():
+        fetcher_script = "fetch_jd_sports_data.py"
+        if os.path.exists(fetcher_script):
+            print(f"Updating JD stock data using {fetcher_script}...")
+            subprocess.run([sys.executable, fetcher_script], check=True)
+        else:
+            print(f"Fetcher script {fetcher_script} not found. Proceeding with existing CSV.")
 
 def create_features(df):
     df['Returns'] = df['Close'].pct_change()
@@ -38,148 +32,155 @@ def create_features(df):
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
     return df
 
-full_data = create_features(full_data)
-full_data = full_data.dropna()
-
-def generate_predictions(last_price, days, historical_data):
+def generate_predictions(last_price, n_days, historical_data, random_state):
     predictions = [last_price]
-    
-    # Parameters from recent data
-    recent_volatility = historical_data['Daily_Volatility'].iloc[-20:].mean()
-    recent_trend = (historical_data['Close'].iloc[-1] / historical_data['Close'].iloc[-20] - 1) / 20
-    
-    # Conservative bounds
-    max_price = last_price * 1.15  # Maximum 15% up
-    min_price = last_price * 0.85  # Maximum 15% down
-    
-    # Smooth transition parameters
-    transition_days = 10
-    
-    for day in range(days):
+    # Use global mean/volatility for all data
+    drift = historical_data['Returns'].mean()
+    volatility = historical_data['Returns'].std()
+    for day in range(n_days):
         prev_price = predictions[-1]
-        
-        # Smooth transition
-        transition_factor = min(1.0, day / transition_days)
-        current_trend = recent_trend * (1 - transition_factor)
-        
-        # Mild seasonal component
-        seasonal = 0.001 * np.sin(2 * np.pi * day / 252)
-        
-        # Controlled volatility
-        daily_vol = min(recent_volatility * 0.5, 0.008) * (1 + transition_factor)
-        random_component = np.random.normal(0, daily_vol)
-        
-        # Combined return
-        daily_return = current_trend + seasonal + random_component
-        
-        # Apply limits
-        daily_return = np.clip(daily_return, -0.015, 0.015)  # Max 1.5% daily move
+        # Only essential stochasticity for uncertainty
+        daily_return = drift + random_state.normal(0, volatility)
         new_price = prev_price * (1 + daily_return)
-        new_price = np.clip(new_price, min_price, max_price)
-        
         predictions.append(new_price)
-    
     return predictions[1:]
 
-# Setup prediction parameters
-current_date = pd.Timestamp('2025-06-19 15:50:11')
-end_date = pd.Timestamp('2025-12-31')
-future_dates = pd.date_range(start=current_date, end=end_date, freq='B')
-n_days = len(future_dates)
-last_known_price = full_data['Close'].iloc[-1]
+def backtest(historical_data, n_days, num_scenarios, seed):
+    # Go back through history and test prediction accuracy for each horizon
+    min_backtest_year = 2010
+    results = []
+    for i, current_date in enumerate(historical_data.index[:-n_days]):
+        if historical_data.index[i].year < min_backtest_year:
+            continue
+        last_price = historical_data['Close'].iloc[i]
+        true_series = historical_data['Close'].iloc[i+1:i+1+n_days].values
+        scenario_errors = []
+        for s in range(num_scenarios):
+            scenario = generate_predictions(last_price, n_days, historical_data.iloc[:i+1], np.random.RandomState(seed+s))
+            scenario = np.array(scenario)
+            # Calculate relative error at each horizon
+            if len(true_series) < len(scenario):  # Out of data (end of file)
+                continue
+            error = np.abs(scenario - true_series) / (true_series + 1e-9)
+            scenario_errors.append(error)
+        if scenario_errors:
+            scenario_errors = np.stack(scenario_errors)
+            mean_error = scenario_errors.mean(axis=0)
+            results.append(mean_error)
+    # Average over all backtests
+    if results:
+        results = np.stack(results)
+        horizon_mse = results.mean(axis=0)
+        return horizon_mse
+    else:
+        return None
 
-# Generate scenarios
-n_scenarios = 50
-all_scenarios = []
-print("Generating scenarios...")
+def get_confidence_horizon(horizon_mse, future_dates, threshold=0.30):
+    """Return the first date where mean relative error exceeds threshold (30% by default)."""
+    if horizon_mse is None:
+        return None
+    for i, mse in enumerate(horizon_mse):
+        if mse > threshold:
+            return future_dates[i]
+    return None
 
-for i in range(n_scenarios):
-    if i % 10 == 0:
-        print(f"Processing scenario {i+1}/{n_scenarios}")
-    scenario = generate_predictions(last_known_price, n_days, full_data)
-    all_scenarios.append(scenario)
+if __name__ == "__main__":
+    csv_file, years_to_predict, n_scenarios_to_show, seed = get_user_inputs()
+    run_fetcher_if_needed(csv_file)
+    df = pd.read_csv(csv_file)
+    if 'Date' in df.columns:
+        df['Date'] = pd.to_datetime(df['Date'])
+        df.set_index('Date', inplace=True)
+    else:
+        print("Error: CSV must have a 'Date' column.")
+        sys.exit(1)
+    df = pd.read_csv(csv_file)
 
-# Calculate statistics
-predictions = np.mean(all_scenarios, axis=0)
-confidence_lower = np.percentile(all_scenarios, 15, axis=0)
-confidence_upper = np.percentile(all_scenarios, 85, axis=0)
+    # Clean the DataFrame
+    df = df[pd.to_numeric(df['Close'], errors='coerce').notnull()]
+    for col in ['Close', 'High', 'Low', 'Open']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
+    df['Date'] = pd.to_datetime(df['Date'])
+    df.set_index('Date', inplace=True)
 
-# Plotting
-plt.figure(figsize=(15, 8))
+    df = create_features(df)
+    df = df.dropna()
 
-# Plot 2025 data
-data_2025 = full_data[full_data.index >= '2025-01-01']
-plt.plot(data_2025.index, data_2025['Close'], label='2025 Data', color='blue')
+    last_date = df.index[-1]
+    n_days = int(252 * years_to_predict)
+    future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=n_days, freq='B')
+    last_known_price = df['Close'].iloc[-1]
 
-# Plot predictions
-plt.plot(future_dates, predictions, label='Predictions', color='red', linestyle='--')
-plt.fill_between(future_dates, confidence_lower, confidence_upper,
-                 color='red', alpha=0.2, label='70% Confidence Interval')
+    # Set random seed for reproducibility
+    np.random.seed(seed)
 
-# Y-axis limits
-all_values = np.concatenate([data_2025['Close'], predictions, confidence_upper, confidence_lower])
-y_min = max(min(all_values) * 0.98, 0)
-y_max = min(max(all_values) * 1.02, last_known_price * 1.15)
+    # Generate and show scenario paths
+    all_scenarios = []
+    print(f"Generating {n_scenarios_to_show} scenario paths...")
+    for i in range(n_scenarios_to_show):
+        scenario = generate_predictions(last_known_price, n_days, df, np.random.RandomState(seed+i))
+        all_scenarios.append(scenario)
+    all_scenarios = np.array(all_scenarios)
 
-plt.ylim(y_min, y_max)
-plt.title('JD Sports Stock Price - 2025 Full Year')
-plt.xlabel('Date')
-plt.ylabel('Price (£)')
-plt.legend()
-plt.grid(True)
-plt.xticks(rotation=45)
+    # Calculate mean and confidence intervals for background
+    n_background_scenarios = 100
+    all_for_stats = []
+    for i in range(n_background_scenarios):
+        scenario = generate_predictions(last_known_price, n_days, df, np.random.RandomState(seed+1000+i))
+        all_for_stats.append(scenario)
+    all_for_stats = np.array(all_for_stats)
+    mean_pred = np.mean(all_for_stats, axis=0)
+    conf_int_95 = np.percentile(all_for_stats, [2.5, 97.5], axis=0)
 
-# Current date marker
-plt.axvline(x=current_date, color='green', linestyle=':', label='Current Time')
+    # Backtest to get honest uncertainty at each time horizon
+    print("Running backtest for honest uncertainty...")
+    horizon_mse = backtest(df, n_days, 10, seed)
+    confidence_horizon = get_confidence_horizon(horizon_mse, future_dates, threshold=0.30)
 
-# Format y-axis
-plt.gca().yaxis.set_major_formatter(plt.FormatStrFormatter('£%.2f'))
+    # Plot
+    plt.figure(figsize=(15, 8))
+    plt.plot(df.index, df['Close'], label='Historical', color='blue')
+    # Plot individual scenario paths
+    for i, scenario in enumerate(all_scenarios):
+        plt.plot(future_dates, scenario, color='orange', alpha=0.5 if n_scenarios_to_show > 3 else 0.8, linewidth=1, label='Scenario' if i == 0 else None)
+    # Plot mean and confidence interval as background
+    plt.plot(future_dates, mean_pred, color='red', linestyle='--', label='Mean Prediction')
+    plt.fill_between(future_dates, conf_int_95[0], conf_int_95[1], color='red', alpha=0.15, label='95% Confidence Interval')
 
-plt.tight_layout()
-plt.show()
+    # Show honest uncertainty window
+    if confidence_horizon is not None:
+        plt.text(
+            0.99, 0.02,
+            f"Note: Based on backtesting, predictions after {confidence_horizon.year} are highly uncertain.",
+            transform=plt.gca().transAxes,
+            ha='right', va='bottom',
+            color='red', fontsize=12, bbox=dict(facecolor='white', alpha=0.8, edgecolor='red')
+        )
+        plt.axvline(confidence_horizon, color='red', linestyle=':', alpha=0.6)
+    else:
+        plt.text(
+            0.99, 0.02,
+            f"Backtesting could not determine a confident forecast horizon.",
+            transform=plt.gca().transAxes,
+            ha='right', va='bottom',
+            color='red', fontsize=12, bbox=dict(facecolor='white', alpha=0.8, edgecolor='red')
+        )
 
-# Print analysis
-print("\nJD Sports Stock Analysis Report")
-print("===============================")
-print(f"Generated by: remdogs")
-print(f"Date and Time: {current_date} UTC")
+    plt.title(f'Stock Price Predictions ({last_date.year + 1}-{last_date.year + int(years_to_predict)})')
+    plt.xlabel('Date')
+    plt.ylabel('Price (£)')
+    plt.legend()
+    plt.grid(True)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
 
-print("\n2025 Performance:")
-print(f"Year Start: £{data_2025['Close'].iloc[0]:.2f}")
-print(f"Current Price: £{data_2025['Close'].iloc[-1]:.2f}")
-print(f"YTD Return: {((data_2025['Close'].iloc[-1]/data_2025['Close'].iloc[0])-1)*100:.1f}%")
-
-print("\nPredicted Performance (H2 2025):")
-print(f"Predicted EOY Price: £{predictions[-1]:.2f}")
-print(f"Predicted H2 Return: {((predictions[-1]/predictions[0])-1)*100:.1f}%")
-
-print("\nMonthly Analysis 2025:")
-# First half (actual)
-for month in range(1, 7):
-    month_data = data_2025[data_2025.index.month == month]
-    if len(month_data) > 0:
-        print(f"\n{pd.Timestamp(f'2025-{month:02d}-01').strftime('%B')} (Actual):")
-        print(f"Average: £{month_data['Close'].mean():.2f}")
-        print(f"Range: £{month_data['Close'].min():.2f} - £{month_data['Close'].max():.2f}")
-        print(f"Volatility: {month_data['Daily_Volatility'].mean()*100:.1f}%")
-
-# Second half (predicted)
-for month in range(7, 13):
-    month_start = pd.Timestamp(f"2025-{month:02d}-01")
-    month_end = pd.Timestamp(f"2025-{month:02d}-01") + pd.offsets.MonthEnd(1)
-    mask = (future_dates >= month_start) & (future_dates <= month_end)
-    month_prices = predictions[mask]
-    if len(month_prices) > 0:
-        print(f"\n{pd.Timestamp(f'2025-{month:02d}-01').strftime('%B')} (Predicted):")
-        print(f"Average: £{np.mean(month_prices):.2f}")
-        print(f"Range: £{min(month_prices):.2f} - £{max(month_prices):.2f}")
-        print(f"Volatility: {np.std(month_prices)/np.mean(month_prices)*100:.1f}%")
-        
-        
-"""
-the next thing to do would be try to understand how the current news for each
-day,week or month buy pulling all relevent news from that time period. then pass
-it into gpt and determine how it will influence the stock price and by how much.
-this would then allow the program to not just be influced by the pure graph but
-also by real world events
-"""
+    print("\nPrediction Analysis:")
+    print(f"Starting price: £{mean_pred[0]:.2f}")
+    print(f"Ending price (mean): £{mean_pred[-1]:.2f}")
+    if confidence_horizon is not None:
+        print(f"Model is historically confident up to: {confidence_horizon.strftime('%Y-%m-%d')}")
+        print(f"(Predictions after this are likely to be less reliable: >30% mean relative error in backtests)")
+    else:
+        print("Confidence horizon could not be determined (insufficient backtest data).")
