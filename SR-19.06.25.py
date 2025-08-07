@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 import sys
 import argparse
 import subprocess
@@ -185,3 +186,5 @@ if __name__ == "__main__":
         print(f"(Predictions after this are likely to be less reliable: >30% mean relative error in backtests)")
     else:
         print("Confidence horizon could not be determined (insufficient backtest data).")
+=======
+>>>>>>> a9fc37d1ddf5e0259193470d4155f197493927c1
