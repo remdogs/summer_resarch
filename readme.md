@@ -11,3 +11,4 @@ an example of how the program can be called is
 </b>
 python SR-19.06.25.py --csv visa_stock_up_to_date.csv --years 10;
 
+some issues on developer side with getting datasets. jd sport line 2 not behaving and sr python file for some reason tries to change it but messes it up. tried to change directories but did not help. need to fix soonish

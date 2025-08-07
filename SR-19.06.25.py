@@ -62,6 +62,7 @@ def backtest(historical_data, n_days, num_scenarios, seed):
             if len(true_series) < len(scenario):  # Out of data (end of file)
                 continue
             error = np.abs(scenario - true_series) / (true_series + 1e-9)
+            # dont really know what this line above but without the error parameters code does not work
             scenario_errors.append(error)
         if scenario_errors:
             scenario_errors = np.stack(scenario_errors)
